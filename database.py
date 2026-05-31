@@ -1,4 +1,5 @@
 import aiosqlite
+import json
 
 
 class Database:
@@ -12,7 +13,7 @@ class Database:
                     id INTEGER PRIMARY KEY,
                     gender TEXT DEFAULT NULL,
                     age INTEGER DEFAULT NULL,
-                    interests TEXT DEFAULT NULL,
+                    interests TEXT DEFAULT '[]',
                     search_gender TEXT DEFAULT 'any',
                     ref_by INTEGER DEFAULT NULL,
                     ref_count INTEGER DEFAULT 0,
@@ -33,12 +34,11 @@ class Database:
                     user_id INTEGER PRIMARY KEY,
                     gender TEXT DEFAULT NULL,
                     search_gender TEXT DEFAULT 'any',
+                    interests TEXT DEFAULT '[]',
                     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             """)
             await db.commit()
-
-    # ── Пользователи ─────────────────────────────────────────────────────
 
     async def add_user(self, uid: int, ref_by: int = None):
         async with aiosqlite.connect(self.path) as db:
@@ -58,9 +58,18 @@ class Database:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM users WHERE id = ?", (uid,)) as cur:
                 row = await cur.fetchone()
-        return dict(row) if row else None
+        if not row:
+            return None
+        d = dict(row)
+        try:
+            d["interests"] = json.loads(d.get("interests") or "[]")
+        except:
+            d["interests"] = []
+        return d
 
     async def update_user(self, uid: int, **kwargs):
+        if "interests" in kwargs and isinstance(kwargs["interests"], list):
+            kwargs["interests"] = json.dumps(kwargs["interests"], ensure_ascii=False)
         fields = ", ".join(f"{k} = ?" for k in kwargs)
         values = list(kwargs.values()) + [uid]
         async with aiosqlite.connect(self.path) as db:
@@ -75,13 +84,11 @@ class Database:
         user = await self.get_user(uid)
         return bool(user and user.get("is_banned"))
 
-    # ── Очередь ───────────────────────────────────────────────────────────
-
-    async def add_to_queue(self, uid: int, gender: str, search_gender: str):
+    async def add_to_queue(self, uid: int, gender: str, search_gender: str, interests: list):
         async with aiosqlite.connect(self.path) as db:
             await db.execute(
-                "INSERT OR REPLACE INTO queue (user_id, gender, search_gender) VALUES (?, ?, ?)",
-                (uid, gender, search_gender)
+                "INSERT OR REPLACE INTO queue (user_id, gender, search_gender, interests) VALUES (?, ?, ?, ?)",
+                (uid, gender, search_gender, json.dumps(interests, ensure_ascii=False))
             )
             await db.commit()
 
@@ -95,42 +102,54 @@ class Database:
             async with db.execute("SELECT 1 FROM queue WHERE user_id = ?", (uid,)) as cur:
                 return await cur.fetchone() is not None
 
-    async def get_from_queue(self, exclude_uid: int, my_gender: str, search_gender: str) -> int | None:
-        """
-        Ищем подходящего партнёра:
-        - если search_gender != 'any' → партнёр должен быть нужного пола
-        - партнёр должен искать нас (any или наш пол)
-        """
+    async def get_from_queue(self, exclude_uid: int, my_gender: str, search_gender: str, my_interests: list) -> int | None:
         async with aiosqlite.connect(self.path) as db:
+            db.row_factory = aiosqlite.Row
             if search_gender == "any":
                 query = """
-                    SELECT user_id FROM queue
+                    SELECT user_id, interests FROM queue
                     WHERE user_id != ?
                       AND (search_gender = 'any' OR search_gender = ?)
-                    ORDER BY added_at LIMIT 1
+                    ORDER BY added_at
                 """
                 params = (exclude_uid, my_gender)
             else:
                 query = """
-                    SELECT user_id FROM queue
+                    SELECT user_id, interests FROM queue
                     WHERE user_id != ?
                       AND gender = ?
                       AND (search_gender = 'any' OR search_gender = ?)
-                    ORDER BY added_at LIMIT 1
+                    ORDER BY added_at
                 """
                 params = (exclude_uid, search_gender, my_gender)
 
             async with db.execute(query, params) as cur:
-                row = await cur.fetchone()
+                rows = await cur.fetchall()
 
-            if row:
-                uid = row[0]
-                await db.execute("DELETE FROM queue WHERE user_id = ?", (uid,))
+        if not rows:
+            return None
+
+        # Ищем по общим интересам
+        best_uid = None
+        best_score = -1
+
+        for row in rows:
+            try:
+                their_interests = json.loads(row["interests"] or "[]")
+            except:
+                their_interests = []
+
+            common = len(set(my_interests) & set(their_interests))
+            if common > best_score:
+                best_score = common
+                best_uid = row["user_id"]
+
+        if best_uid:
+            async with aiosqlite.connect(self.path) as db:
+                await db.execute("DELETE FROM queue WHERE user_id = ?", (best_uid,))
                 await db.commit()
-                return uid
-        return None
 
-    # ── Пары ──────────────────────────────────────────────────────────────
+        return best_uid
 
     async def create_pair(self, uid1: int, uid2: int):
         async with aiosqlite.connect(self.path) as db:
@@ -162,8 +181,6 @@ class Database:
                 (uid, uid)
             )
             await db.commit()
-
-    # ── Статистика ────────────────────────────────────────────────────────
 
     async def get_stats(self) -> dict:
         async with aiosqlite.connect(self.path) as db:
