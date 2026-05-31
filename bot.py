@@ -13,7 +13,7 @@ from database import Database
 
 # ─── ВСТАВЬ СВОЙ ТОКЕН СЮДА ───────────────────────────────────────────
 import os
-BOT_TOKEN = os.environ.get("8936794059:AAEPQZi7XxGXAakHVwN1ynRy8JRy6DR6v9A")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
 # ──────────────────────────────────────────────────────────────────────
 
 logging.basicConfig(level=logging.INFO)
